@@ -2,6 +2,7 @@
 import sys
 import re
 import io
+import collections
 
 # 1. FORCE UTF-8 HANDLING
 sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
@@ -18,87 +19,114 @@ def fix_encoding_artifacts(text):
         text = text.replace(bad, good)
     return text
 
+def detect_column_count(lines, all_cells):
+    """
+    Forensic analysis to find the TRUE column count (N).
+    Priority 1: Separator Line (|---|---|)
+    Priority 2: Rhythm of Bold Cells (**Start**)
+    Priority 3: Header Line (Sanitized)
+    """
+    # 1. Check for Separator Line (Most Reliable)
+    for line in lines:
+        if '|' in line and set(line).issubset({'|', '-', ' ', ':'}):
+            parts = [c for c in line.split('|') if c.strip()]
+            if len(parts) >= 2:
+                return len(parts)
+
+    # 2. Check for Bold Rhythm (The "Anchor" Method)
+    # In these tables, the first column usually starts with **Bold Text**
+    bold_indices = [i for i, cell in enumerate(all_cells) if cell.startswith('**')]
+    
+    if len(bold_indices) > 1:
+        # Calculate distances between bold cells
+        distances = []
+        for i in range(len(bold_indices) - 1):
+            dist = bold_indices[i+1] - bold_indices[i]
+            # Filter out tiny distances (e.g. bold in col 1 AND col 2)
+            if dist >= 2:
+                distances.append(dist)
+        
+        if distances:
+            # Find the most common distance (Mode)
+            # This handles cases where one row might be weird, but most are N
+            count_map = collections.Counter(distances)
+            most_common = count_map.most_common(1)[0][0]
+            if most_common > 1:
+                return most_common
+
+    # 3. Fallback: Header Line Analysis
+    # Be careful of headers that merge with body rows on the same line
+    # e.g. "Col1 | Col2 | Col3 || **Row1Col1**"
+    if all_cells:
+        # Heuristic: If we see a Bold cell in the first few cells, 
+        # the header was likely merged. Cut off there.
+        for i, cell in enumerate(all_cells[:10]): # Check first 10 cells
+            if i > 0 and cell.startswith('**'):
+                return i # Found a bold cell at index i, so header is 0 to i-1
+    
+    # Last Resort: Just count the header cells from the first line (sanitized)
+    header_raw = lines[0].split('|')
+    header_clean = [c for c in header_raw if c.strip()]
+    return max(2, len(header_clean))
+
 def normalize_table_block(block_lines):
     """
-    Smartly reconstructs tables by identifying 'True' rows vs 'Fragment' lines.
-    Handles extra garbage pipes (|| | |) and fragmented cells.
+    Bag-of-Cells Strategy with Smart Column Detection.
     """
     lines = [l.strip() for l in block_lines if l.strip()]
     if not lines: return []
 
-    # 1. Analyze Header to find True Column Count
-    header = lines[0]
-    # Split and filter out empty strings to find actual content columns
-    header_cells = [c.strip() for c in header.split('|') if c.strip()]
-    col_count = len(header_cells)
-    if col_count < 2: col_count = 2 # Safety fallback
+    # 1. Harvest ALL Content Cells (Bag of Cells)
+    all_content_cells = []
+    
+    # We skip lines that are purely separator lines from the *content* bag,
+    # but we keep them in 'lines' for detection purposes.
+    for line in lines:
+        # Check if separator
+        if set(line).issubset({'|', '-', ' ', ':'}):
+            continue
+            
+        raw_cells = line.split('|')
+        for c in raw_cells:
+            clean_c = c.strip()
+            # Filter garbage empty cells
+            if clean_c:
+                all_content_cells.append(clean_c)
 
-    merged_rows = []
-    current_raw_string = ""
-    
-    for i, line in enumerate(lines):
-        # 2. Logic to detect a "New Row" vs "Continuation"
-        # Always treat the first two lines (Header + Separator) as new rows
-        is_header_or_sep = (i == 0) or (i == 1 and set(line).issubset({'|', '-', ' ', ':'}))
-        
-        # Strict Trigger: A new body row MUST start with "| **" (Bold) in this format
-        # or be a very clear full row (heuristic).
-        is_bold_start = line.startswith('| **') or line.startswith('|**')
-        
-        if is_header_or_sep or is_bold_start:
-            # Save previous buffer
-            if current_raw_string: merged_rows.append(current_raw_string)
-            current_raw_string = line
-        else:
-            # Continuation: Append to buffer
-            # Cleanly merge: if buffer ends with | and line starts with |, strip one
-            clean_line = line.strip()
-            if current_raw_string.endswith('|') and clean_line.startswith('|'):
-                current_raw_string += " " + clean_line.lstrip('|')
-            else:
-                current_raw_string += " " + clean_line
-    
-    # Flush last buffer
-    if current_raw_string: merged_rows.append(current_raw_string)
-    
-    # 3. Rebuild and Sanitize Columns
+    if not all_content_cells: return block_lines
+
+    # 2. Detect True Column Count
+    col_count = detect_column_count(lines, all_content_cells)
+
+    # 3. Reconstruct Table
     final_lines = []
-    for row_str in merged_rows:
-        # Split by pipe
-        cells = [c.strip() for c in row_str.split('|')]
+    
+    # Write Header (first N cells)
+    header_cells = all_content_cells[:col_count]
+    final_lines.append('| ' + ' | '.join(header_cells) + ' |')
+    
+    # Write Clean Separator
+    final_lines.append('|' + '|'.join(['---'] * col_count) + '|')
+    
+    # Write Body Rows
+    body_cells = all_content_cells[col_count:]
+    
+    for i in range(0, len(body_cells), col_count):
+        row_chunk = body_cells[i : i + col_count]
         
-        # Remove empty start/end created by split
-        if cells and not cells[0]: cells.pop(0)
-        if cells and not cells[-1]: cells.pop()
-        
-        # CRITICAL: Remove garbage empty cells from the END only (fixes || | |)
-        while len(cells) > col_count and not cells[-1]:
-            cells.pop()
+        # Pad orphan cells
+        while len(row_chunk) < col_count:
+            row_chunk.append("")
             
-        # Merge if still too many (e.g. pipe inside content)
-        if len(cells) > col_count:
-            base = cells[:col_count-1]
-            rest = " ".join(cells[col_count-1:])
-            base.append(rest)
-            cells = base
-        
-        # Pad if too few
-        while len(cells) < col_count:
-            cells.append("")
-            
-        # Generate clean row
-        if all(re.match(r'^[-:\s]+$', c) for c in cells if c):
-            final_lines.append('|' + '|'.join(['---'] * col_count) + '|')
-        else:
-            final_lines.append('| ' + ' | '.join(cells) + ' |')
-            
+        final_lines.append('| ' + ' | '.join(row_chunk) + ' |')
+
     return final_lines
 
 def clean_text(text):
     # PHASE 0: Encoding Repair
     text = fix_encoding_artifacts(text)
 
-    # PHASE 1: Structural Repairs (Orphan Bullets)
+    # PHASE 1: Structural Merging
     lines = text.split('\n')
     merged_lines = []
     i = 0
@@ -106,29 +134,46 @@ def clean_text(text):
     
     while i < len(lines):
         line = lines[i]
+        stripped = line.strip()
+        
+        # Header Merging
+        if re.match(r'^#{1,6}\s+', line):
+            found = False
+            if i + 1 < len(lines):
+                next_l = lines[i+1].strip()
+                if next_l and not re.match(r'^[-*#|]', next_l) and next_l[0].islower():
+                    merged_lines.append(f"{stripped} {next_l}")
+                    i += 2; found = True
+                elif not next_l and i + 2 < len(lines):
+                    next_next = lines[i+2].strip()
+                    if next_next and not re.match(r'^[-*#|]', next_next) and next_next[0].islower():
+                        merged_lines.append(f"{stripped} {next_next}")
+                        i += 3; found = True
+            if not found:
+                merged_lines.append(line); i += 1
+            continue
+
+        # List Merging
         match = orphan_bullet_pattern.match(line)
         if match:
-            bullet_char = match.group(2)
-            found_text = False
+            prefix, bullet = match.group(1), match.group(2)
+            found = False
             if i + 1 < len(lines):
-                next_line = lines[i+1].strip()
-                if next_line:
-                    merged_lines.append(f"{match.group(1)}{bullet_char} {next_line}")
-                    i += 2
-                    found_text = True
+                next_l = lines[i+1].strip()
+                if next_l:
+                    merged_lines.append(f"{prefix}{bullet} {next_l}")
+                    i += 2; found = True
                 elif i + 2 < len(lines):
-                    next_next_line = lines[i+2].strip()
-                    if next_next_line:
-                        merged_lines.append(f"{match.group(1)}{bullet_char} {next_next_line}")
-                        i += 3
-                        found_text = True
-            if not found_text:
-                merged_lines.append(line)
-                i += 1
-        else:
-            merged_lines.append(line)
-            i += 1
-    
+                    next_next = lines[i+2].strip()
+                    if next_next:
+                        merged_lines.append(f"{prefix}{bullet} {next_next}")
+                        i += 3; found = True
+            if not found:
+                merged_lines.append(line); i += 1
+            continue
+            
+        merged_lines.append(line); i += 1
+
     text = "\n".join(merged_lines)
 
     # PHASE 2: Typographical
@@ -140,98 +185,78 @@ def clean_text(text):
     text = re.sub(r'"', r'”', text)
     text = re.sub(r"(\w)'(\w)", r"\1’\2", text)
     text = re.sub(r"'", r"’", text)
-    
     def capitalize_match(match): return ". " + match.group(1).upper()
     text = re.sub(r';\s*([a-z])', capitalize_match, text)
+    text = text.replace("—", " – ").replace("---", "").replace("***", "")
 
-    text = text.replace("—", " – ")
-    text = text.replace("---", "")
-    text = text.replace("***", "")
-
-    # PHASE 3: Smart Table Detection
+    # PHASE 3: Table Detection
     lines = text.split('\n')
-    lines_with_tables_fixed = []
-    table_buffer = []
+    lines_with_tables = []
+    buffer = []
     in_table = False
     
     for line in lines:
         stripped = line.strip()
-        # Trigger: Pipe exists
         if '|' in line:
-            in_table = True
-            table_buffer.append(line)
-        # Continuation: Empty line inside table
+            in_table = True; buffer.append(line)
         elif in_table and not stripped:
-            table_buffer.append(line)
-        # End: Text without pipe
+            buffer.append(line)
         elif in_table and stripped and '|' not in line:
-            lines_with_tables_fixed.extend(normalize_table_block(table_buffer))
-            table_buffer = []
-            in_table = False
-            lines_with_tables_fixed.append(line)
+            lines_with_tables.extend(normalize_table_block(buffer))
+            buffer = []; in_table = False
+            lines_with_tables.append(line)
         else:
-            lines_with_tables_fixed.append(line)
-            
-    if in_table and table_buffer:
-        lines_with_tables_fixed.extend(normalize_table_block(table_buffer))
-        
-    lines = lines_with_tables_fixed
+            lines_with_tables.append(line)
+    if in_table and buffer:
+        lines_with_tables.extend(normalize_table_block(buffer))
+    lines = lines_with_tables
 
     # PHASE 4: Formatting
-    final_lines = []
+    final = []
     found_title = False
-    promote_headings = False
+    promote = False
     
     for line in lines:
         stripped = line.strip()
-        if not stripped:
-            final_lines.append("")
-            continue
-            
+        if not stripped: final.append(""); continue
+        
         if not found_title:
             if re.match(r'^#\s+', line):
-                promote_headings = True
+                promote = True
                 line = re.sub(r'^#\s+', '', line)
-            found_title = True
-            final_lines.append(line)
-            continue
+            found_title = True; final.append(line); continue
 
         if re.match(r'^[ \t]*[*•]\s+', line):
             line = re.sub(r'^([ \t]*)[*•]\s+', r'\1- ', line)
-            
         if re.match(r'^\s*\*\*([^*\r\n]+)\*\*\s*$', line):
             line = re.sub(r'^\s*\*\*([^*\r\n]+)\*\*\s*$', r'## \1', line)
-            
         if re.match(r'^(#{1,6}\s+.+?):\s*$', line):
              line = re.sub(r'^(#{1,6}\s+.+?):\s*$', r'\1', line)
-
-        if promote_headings and re.match(r'^#+\s+', line):
+        if promote and re.match(r'^#+\s+', line):
             line = re.sub(r'^#', '', line)
 
-        is_list_or_table = re.match(r'^\s*([-*+]|•|\d+\.|#|\|)', line)
-        if is_list_or_table:
-            final_lines.append(line)
+        is_struct = re.match(r'^\s*([-*+]|•|\d+\.|#|\|)', line)
+        if is_struct:
+            final.append(line)
         else:
             abbrevs = {'Mr', 'Mrs', 'Ms', 'Dr', 'Prof', 'Sr', 'Jr', 'vs', 'etc', 'Fig', 'al', 'e.g', 'i.e'}
             words = line.split(' ')
-            new_paragraph = []
-            for i, word in enumerate(words):
-                new_paragraph.append(word)
-                if word and word[-1] in '.?!' and '"' not in word and '”' not in word:
-                    if i + 1 < len(words) and words[i+1] and words[i+1][0].isupper():
-                         clean_word = re.sub(r'[^\w]', '', word)
-                         if clean_word not in abbrevs:
-                             new_paragraph.append('\n\n')
-            processed = " ".join(new_paragraph).replace(' \n\n ', '\n\n')
-            final_lines.append(processed)
+            new_p = []
+            for i, w in enumerate(words):
+                new_p.append(w)
+                if w and w[-1] in '.?!' and '"' not in w and '”' not in w:
+                    if i+1 < len(words) and words[i+1] and words[i+1][0].isupper():
+                         clean = re.sub(r'[^\w]', '', w)
+                         if clean not in abbrevs: new_p.append('\n\n')
+            final.append(" ".join(new_p).replace(' \n\n ', '\n\n'))
 
-    return "\n".join(final_lines)
+    return "\n".join(final)
 
 if __name__ == "__main__":
-    raw_input = ""
+    raw = ""
     try:
-        raw_input = sys.stdin.read()
-        if not raw_input: sys.exit(0)
-        print(clean_text(raw_input))
+        raw = sys.stdin.read()
+        if not raw: sys.exit(0)
+        print(clean_text(raw))
     except Exception as e:
-        if raw_input: print(raw_input)
+        if raw: print(raw)
