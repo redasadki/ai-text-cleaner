@@ -20,83 +20,78 @@ def fix_encoding_artifacts(text):
 
 def normalize_table_block(block_lines):
     """
-    Reconstructs malformed tables where rows are split across multiple lines.
-    Strategy: Merge lines until the pipe count matches the header's pipe count.
+    Smartly reconstructs tables by identifying 'True' rows vs 'Fragment' lines.
+    Handles extra garbage pipes (|| | |) and fragmented cells.
     """
-    # 1. Remove pure blank lines (noise)
-    lines = [line.strip() for line in block_lines if line.strip()]
+    lines = [l.strip() for l in block_lines if l.strip()]
     if not lines: return []
 
-    # 2. Identify Header & Target Pipe Count
+    # 1. Analyze Header to find True Column Count
     header = lines[0]
-    # We count pipes to know what a "complete" row looks like.
-    target_pipes = header.count('|')
-    # Safety: If header has fewer than 2 pipes, it's not a valid table.
-    if target_pipes < 2: return block_lines
-
-    reconstructed_rows = []
-    current_buffer = ""
-    
-    # 3. Merge fragmented lines
-    for line in lines:
-        # If buffer is empty, start new row.
-        # If buffer has content, join.
-        # Heuristic: If the continuation line starts with '|', just concat (it's a delimiter).
-        # If it starts with text, add a space (it's a word wrap).
-        if not current_buffer:
-            current_buffer = line
-        else:
-            if line.startswith('|'):
-                current_buffer += line # likely " | next cell"
-            else:
-                current_buffer += " " + line # likely " wrapped text"
-        
-        # Check if we have formed a complete row
-        # (We count escaped pipes \| as 0, but here we assume simple pipes)
-        if current_buffer.count('|') >= target_pipes:
-            reconstructed_rows.append(current_buffer)
-            current_buffer = ""
-    
-    # Append any leftover buffer (e.g. last row missing a closing pipe)
-    if current_buffer:
-        reconstructed_rows.append(current_buffer)
-
-    # 4. Standardize columns (Fill missing cells, fix separators)
-    final_lines = []
-    header_cells = [c.strip() for c in reconstructed_rows[0].strip('|').split('|')]
+    # Split and filter out empty strings to find actual content columns
+    header_cells = [c.strip() for c in header.split('|') if c.strip()]
     col_count = len(header_cells)
+    if col_count < 2: col_count = 2 # Safety fallback
 
-    for row in reconstructed_rows:
-        # Split cells
-        cells = [c.strip() for c in row.strip('|').split('|')]
+    merged_rows = []
+    current_raw_string = ""
+    
+    for i, line in enumerate(lines):
+        # 2. Logic to detect a "New Row" vs "Continuation"
+        # Always treat the first two lines (Header + Separator) as new rows
+        is_header_or_sep = (i == 0) or (i == 1 and set(line).issubset({'|', '-', ' ', ':'}))
         
-        # Detect Separator Line (e.g. ---|---)
-        is_separator = all(re.match(r'^[-:\s]+$', c) for c in cells if c)
+        # Strict Trigger: A new body row MUST start with "| **" (Bold) in this format
+        # or be a very clear full row (heuristic).
+        is_bold_start = line.startswith('| **') or line.startswith('|**')
         
-        if is_separator:
-            new_row = '|' + '|'.join(['---'] * col_count) + '|'
-            final_lines.append(new_row)
-            continue
-
-        # Normalize Cell Count
-        current_len = len(cells)
-        if current_len == col_count:
-            new_row = '| ' + ' | '.join(cells) + ' |'
-        elif current_len < col_count:
-            # Pad missing cells
-            padded_cells = cells + [''] * (col_count - current_len)
-            new_row = '| ' + ' | '.join(padded_cells) + ' |'
-        elif current_len > col_count:
-            # Merge extra cells
-            keep_cells = cells[:col_count-1]
-            merged_last = " ".join(cells[col_count-1:])
-            keep_cells.append(merged_last)
-            new_row = '| ' + ' | '.join(keep_cells) + ' |'
+        if is_header_or_sep or is_bold_start:
+            # Save previous buffer
+            if current_raw_string: merged_rows.append(current_raw_string)
+            current_raw_string = line
         else:
-            new_row = '| ' + ' | '.join(cells) + ' |'
+            # Continuation: Append to buffer
+            # Cleanly merge: if buffer ends with | and line starts with |, strip one
+            clean_line = line.strip()
+            if current_raw_string.endswith('|') and clean_line.startswith('|'):
+                current_raw_string += " " + clean_line.lstrip('|')
+            else:
+                current_raw_string += " " + clean_line
+    
+    # Flush last buffer
+    if current_raw_string: merged_rows.append(current_raw_string)
+    
+    # 3. Rebuild and Sanitize Columns
+    final_lines = []
+    for row_str in merged_rows:
+        # Split by pipe
+        cells = [c.strip() for c in row_str.split('|')]
+        
+        # Remove empty start/end created by split
+        if cells and not cells[0]: cells.pop(0)
+        if cells and not cells[-1]: cells.pop()
+        
+        # CRITICAL: Remove garbage empty cells from the END only (fixes || | |)
+        while len(cells) > col_count and not cells[-1]:
+            cells.pop()
             
-        final_lines.append(new_row)
-
+        # Merge if still too many (e.g. pipe inside content)
+        if len(cells) > col_count:
+            base = cells[:col_count-1]
+            rest = " ".join(cells[col_count-1:])
+            base.append(rest)
+            cells = base
+        
+        # Pad if too few
+        while len(cells) < col_count:
+            cells.append("")
+            
+        # Generate clean row
+        if all(re.match(r'^[-:\s]+$', c) for c in cells if c):
+            final_lines.append('|' + '|'.join(['---'] * col_count) + '|')
+        else:
+            final_lines.append('| ' + ' | '.join(cells) + ' |')
+            
     return final_lines
 
 def clean_text(text):
@@ -107,18 +102,33 @@ def clean_text(text):
     lines = text.split('\n')
     merged_lines = []
     i = 0
-    orphan_bullet_pattern = re.compile(r'^\s*([-*+]|\d+\.?)\s*$')
+    orphan_bullet_pattern = re.compile(r'^(\s*)([-*+]|•|\d+\.?)\s*$')
+    
     while i < len(lines):
         line = lines[i]
-        stripped = line.strip()
-        if orphan_bullet_pattern.match(line) and i + 1 < len(lines):
-            next_line = lines[i+1].strip()
-            if next_line:
-                merged_lines.append(f"{stripped} {next_line}")
-                i += 2
-                continue
-        merged_lines.append(line)
-        i += 1
+        match = orphan_bullet_pattern.match(line)
+        if match:
+            bullet_char = match.group(2)
+            found_text = False
+            if i + 1 < len(lines):
+                next_line = lines[i+1].strip()
+                if next_line:
+                    merged_lines.append(f"{match.group(1)}{bullet_char} {next_line}")
+                    i += 2
+                    found_text = True
+                elif i + 2 < len(lines):
+                    next_next_line = lines[i+2].strip()
+                    if next_next_line:
+                        merged_lines.append(f"{match.group(1)}{bullet_char} {next_next_line}")
+                        i += 3
+                        found_text = True
+            if not found_text:
+                merged_lines.append(line)
+                i += 1
+        else:
+            merged_lines.append(line)
+            i += 1
+    
     text = "\n".join(merged_lines)
 
     # PHASE 2: Typographical
@@ -146,36 +156,28 @@ def clean_text(text):
     
     for line in lines:
         stripped = line.strip()
-        
-        # Table Start Trigger: Contains a pipe
+        # Trigger: Pipe exists
         if '|' in line:
             in_table = True
             table_buffer.append(line)
-        
-        # Table Continuation: If we are in a table, capture blank lines too
-        # (so we don't break the table on a blank line between fragments)
+        # Continuation: Empty line inside table
         elif in_table and not stripped:
             table_buffer.append(line)
-            
-        # Table End: Text line with NO pipe
+        # End: Text without pipe
         elif in_table and stripped and '|' not in line:
-            # Process the buffer we collected
             lines_with_tables_fixed.extend(normalize_table_block(table_buffer))
             table_buffer = []
             in_table = False
             lines_with_tables_fixed.append(line)
-            
         else:
-            # Not in table, just normal text
             lines_with_tables_fixed.append(line)
             
-    # Flush buffer if file ends with a table
     if in_table and table_buffer:
         lines_with_tables_fixed.extend(normalize_table_block(table_buffer))
         
     lines = lines_with_tables_fixed
 
-    # PHASE 4: Formatting (Headings, Lists, Sentences)
+    # PHASE 4: Formatting
     final_lines = []
     found_title = False
     promote_headings = False
@@ -194,16 +196,19 @@ def clean_text(text):
             final_lines.append(line)
             continue
 
-        if re.match(r'^\s*\*\s+', line):
-            line = re.sub(r'^(\s*)\*\s+', r'\1- ', line)
+        if re.match(r'^[ \t]*[*•]\s+', line):
+            line = re.sub(r'^([ \t]*)[*•]\s+', r'\1- ', line)
             
-        if re.match(r'^\s*\*\*(.*?)\*\*\s*$', line):
-            line = re.sub(r'^\s*\*\*(.*?)\*\*\s*$', r'## \1', line)
+        if re.match(r'^\s*\*\*([^*\r\n]+)\*\*\s*$', line):
+            line = re.sub(r'^\s*\*\*([^*\r\n]+)\*\*\s*$', r'## \1', line)
             
+        if re.match(r'^(#{1,6}\s+.+?):\s*$', line):
+             line = re.sub(r'^(#{1,6}\s+.+?):\s*$', r'\1', line)
+
         if promote_headings and re.match(r'^#+\s+', line):
             line = re.sub(r'^#', '', line)
 
-        is_list_or_table = re.match(r'^\s*([-*+]|\d+\.|#|\|)', line)
+        is_list_or_table = re.match(r'^\s*([-*+]|•|\d+\.|#|\|)', line)
         if is_list_or_table:
             final_lines.append(line)
         else:
