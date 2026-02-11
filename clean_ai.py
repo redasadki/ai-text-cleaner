@@ -1,8 +1,16 @@
+cat <<EOF > ~/github/ai-text-cleaner/clean_ai.py
 #!/usr/bin/env python3
+"""
+AI Text Cleaner
+Version: 1.2
+Author: Reda Sadki
+"""
 import sys
 import re
 import io
 import collections
+
+__version__ = "1.2"
 
 # 1. FORCE UTF-8 HANDLING
 sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
@@ -20,10 +28,18 @@ def fix_encoding_artifacts(text):
 
 def is_table_like(line):
     """
-    Strict check: A line is part of a table ONLY if it contains a pipe.
+    Strict check: A line is part of a table ONLY if:
+    1. It contains a pipe that is NOT escaped (preceded by backslash).
+    2. It does NOT start with a list marker (1., *, -), unless the line starts with a pipe.
     """
-    if '|' not in line:
+    # 1. Check for unescaped pipe (negative lookbehind for backslash)
+    if not re.search(r'(?<!\\\\)\|', line):
         return False
+        
+    # 2. Reject if it starts with a list marker (e.g. "45.", "* ", "- ")
+    if re.match(r'^\s*(\d+\.|[-*+•])\s+', line):
+        return False
+        
     return True
 
 def detect_column_count(lines, all_cells):
@@ -56,19 +72,15 @@ def normalize_table_block(block_lines):
     # Harvest Cells
     all_content_cells = []
     for line in lines:
-        # Skip pure separator lines from being harvested as text content
         if set(line).issubset({'|', '-', ' ', ':'}): continue
-        
         raw_cells = line.split('|')
         for c in raw_cells:
             if c.strip(): all_content_cells.append(c.strip())
 
     if not all_content_cells: return block_lines
 
-    # Detect Columns
     col_count = detect_column_count(lines, all_content_cells)
 
-    # Reconstruct
     final_lines = []
     header_cells = all_content_cells[:col_count]
     final_lines.append('| ' + ' | '.join(header_cells) + ' |')
@@ -145,14 +157,8 @@ def clean_text(text):
     text = re.sub(r"'", r"’", text)
     def capitalize_match(match): return ". " + match.group(1).upper()
     text = re.sub(r';\s*([a-z])', capitalize_match, text)
-    
     text = text.replace("—", " – ")
-    
-    # CRITICAL: Smart Separator Removal
-    # Remove *** completely
     text = text.replace("***", "")
-    # Remove --- ONLY if the line does NOT contain a pipe
-    # This protects |---| table headers while deleting decorative ---
     text = re.sub(r'(?m)^[ \t]*---+[ \t]*$', '', text)
 
     # PHASE 3: Strict Table Detection
@@ -172,18 +178,15 @@ def clean_text(text):
             buffer.append(line)
         else:
             if in_table:
-                # Flush the table
                 lines_with_tables.extend(normalize_table_block(buffer))
-                # CRITICAL: Force a blank line after every table
                 lines_with_tables.append("") 
                 buffer = []
                 in_table = False
-            
             lines_with_tables.append(line)
             
     if in_table and buffer:
         lines_with_tables.extend(normalize_table_block(buffer))
-        lines_with_tables.append("") # Ensure blank line if file ends with table
+        lines_with_tables.append("")
         
     lines = lines_with_tables
 
@@ -197,10 +200,13 @@ def clean_text(text):
         if not stripped: final.append(""); continue
         
         if not found_title:
-            if re.match(r'^#\s+', line):
-                promote = True
-                line = re.sub(r'^#\s+', '', line)
-            found_title = True; final.append(line); continue
+            if re.match(r'^\s*([-*+•]|\d+\.|\|)', line):
+                 found_title = True 
+            else:
+                 if re.match(r'^#\s+', line):
+                     promote = True
+                     line = re.sub(r'^#\s+', '', line)
+                 found_title = True; final.append(line); continue
 
         if re.match(r'^[ \t]*[*•]\s+', line):
             line = re.sub(r'^([ \t]*)[*•]\s+', r'\1- ', line)
@@ -240,3 +246,4 @@ if __name__ == "__main__":
             raw = sys.stdin.read()
             if raw: print(clean_text(raw))
         except Exception: pass
+EOF
