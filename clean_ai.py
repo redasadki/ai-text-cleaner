@@ -136,7 +136,7 @@ def clean_text(text):
 
     # PHASE 2: Typo Fixes & Separator Removal
     text = re.sub(r'\s+([?!;:])', r'\1', text)
-    text = re.sub(r'\[cite_start\]|\]+\]', '', text)
+    text = re.sub(r'\[cite_start\]|\[(?:cite|source):\s*[^\]]+\]', '', text)
     text = re.sub(r'\b(?:Artifact|Artefact|Screen|Section)\s+\d+\s*:\s*', '', text)
     text = re.sub(r'(\[\d+\])+', '', text)
     text = re.sub(r'(^|[\s\(\[{])"', r'\1“', text)
