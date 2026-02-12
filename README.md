@@ -14,6 +14,28 @@ Copy-pasting text from AI chatbots often results in a mess of formatting errors:
 
 ---
 
+## 🔍 Regex Pattern Reference
+
+The script applies the following patterns (in order) to clean and normalize text.
+
+| Target | Regex / Logic | Replacement / Action | Purpose |
+| :--- | :--- | :--- | :--- |
+| **Citations** | `\[cite_start\]\|\[(?:cite\|source):\s*[^\]]+\]` | *(empty)* | Removes tags like `` or `` |
+| **Artifact Labels** | `\b(?:Artifact\|Artefact\|Screen\|Section)\s+\d+\s*:\s*` | *(empty)* | Removes AI labeling like "Artifact 1: Summary" |
+| **Citation Numbers** | `(\[\d+\])+` | *(empty)* | Removes footnote numbers like `[1]` or `[1][2]` |
+| **Smart Quotes (Open)** | `(^\|[\s\(\[{])"` | `\1“` | Converts opening straight quotes to curly quotes |
+| **Smart Quotes (Close)** | `"` | `”` | Converts remaining quotes to closing curly quotes |
+| **Apostrophes** | `(\w)'(\w)` | `\1’\2` | Fixes apostrophes inside words (e.g., "don't" → "don’t") |
+| **Semicolon Caps** | `;\s*([a-z])` | `. \U\1` | Splits sentences joined by semicolons (e.g., "word; next" → "word. Next") |
+| **Em Dashes** | `—` | ` – ` | Standardizes em-dashes to spaced en-dashes |
+| **Separators** | `***` or `^[ \t]*---+[ \t]*$` | *(empty)* | Removes decorative separator lines (unless part of a table) |
+| **Bullets** | `^([ \t]*)[*•]\s+` | `\1- ` | Standardizes all bullet types (`*`, `•`) to dashes (`-`) |
+| **Bold Headers** | `^\s*\*\*([^*\r\n]+)\*\*\s*$` | `## \1` | Converts standalone bold lines `**Title**` into H2 headers |
+| **Header Colons** | `^(#{1,6}\s+.+?):\s*$` | `\1` | Removes trailing colons from headers (`## Title:` → `## Title`) |
+| **Table Repair** | *(Complex Logic)* | *Rebuilt Table* | Merges broken "Frankenstein" rows and fixes column alignment |
+
+---
+
 ## 🚀 Why do I need this?
 
 If you frequently copy text from AI tools into documents or CMSs, you likely face these issues:
