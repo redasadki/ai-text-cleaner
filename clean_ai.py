@@ -1,4 +1,3 @@
-cat <<EOF > ~/github/ai-text-cleaner/clean_ai.py
 #!/usr/bin/env python3
 """
 AI Text Cleaner
@@ -246,4 +245,3 @@ if __name__ == "__main__":
             raw = sys.stdin.read()
             if raw: print(clean_text(raw))
         except Exception: pass
-EOF
