@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AI Text Cleaner
-Version: 1.4.1
+Version: 1.5
 Author: Reda Sadki
 """
 import sys
@@ -9,7 +9,7 @@ import re
 import io
 import collections
 
-__version__ = "1.4.1"
+__version__ = "1.5"
 
 # 1. FORCE UTF-8 HANDLING
 sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
@@ -32,7 +32,7 @@ def is_table_like(line):
     2. It does NOT start with a list marker (1., *, -), unless the line starts with a pipe.
     """
     # 1. Check for unescaped pipe (negative lookbehind for backslash)
-    if not re.search(r'(?<!\\\\)\\|', line):
+    if not re.search(r'(?<!\\\\)\|', line):
         return False
         
     # 2. Reject if it starts with a list marker (e.g. "45.", "* ", "- ")
@@ -93,33 +93,6 @@ def normalize_table_block(block_lines):
 
     return final_lines
 
-def remove_perplexity_inline_links(text):
-    """
-    Remove Perplexity inline citation links embedded in prose,
-    but preserve standalone reference list items where the entire
-    line content is a single Markdown link (numbered or bulleted).
-
-    Preserved examples:
-        21. [Can higher-proficiency...](https://tandfonline.com/...)
-        - [Project homepage](https://github.com/...)
-        * [Some reference](https://example.com)
-
-    Removed examples (inline in prose):
-        The study found significant impact [Source](https://example.com).
-        See [this article](https://news.com) for details.
-    """
-    standalone_ref = re.compile(
-        r'^\s*(?:\d+\.|-|\*)\s+\[[^\]]+\]\([^)]+\)\s*$'
-    )
-    lines = text.split('\n')
-    result = []
-    for line in lines:
-        if standalone_ref.match(line):
-            result.append(line)
-        else:
-            result.append(re.sub(r'\[[^\]]+\]\([^)]+\)', '', line))
-    return '\n'.join(result)
-
 def clean_text(text):
     # PHASE 0: Encoding
     text = fix_encoding_artifacts(text)
@@ -177,16 +150,21 @@ def clean_text(text):
     text = re.sub(r'\[cite_start\]|\[(?:cite|source):\s*[^\]]+\]', '', text)
     text = re.sub(r'\b(?:Artifact|Artefact|Screen|Section)\s+\d+\s*:\s*', '', text)
     text = re.sub(r'(\[\d+\])+', '', text)
-    # Remove Perplexity footnote references: one or more [^N] markers (with optional whitespace)
+    # Remove Perplexity footnote references: [^1], [^12], sequences like [^1][^2][^3]
     text = re.sub(r'(\[\^\d+\][ \t]*)+', '', text)
-    # Remove Perplexity inline citation links, preserving standalone reference list items
-    text = remove_perplexity_inline_links(text)
-    # Smart quotes: use lambdas / literal Unicode chars in replacements (not raw \u escapes)
-    # Raw \u in re.sub replacement strings raises re.error: bad escape on Python 3.12+
-    text = re.sub(r'(^|[\s\(\[{])"', lambda m: m.group(1) + '\u201c', text)
-    text = re.sub(r'"', '\u201d', text)
-    text = re.sub(r"(\w)'(\w)", lambda m: m.group(1) + '\u2019' + m.group(2), text)
-    text = re.sub(r"'", '\u2019', text)
+    # Remove Perplexity inline citation links embedded in prose (line-by-line so that
+    # standalone numbered/bulleted reference list items are preserved intact)
+    _standalone_ref = re.compile(r'^\s*(?:\d+\.|-|\*)\s+\[[^\]]+\]\([^)]+\)\s*$')
+    _lines = text.split('\n')
+    text = '\n'.join(
+        line if _standalone_ref.match(line)
+        else re.sub(r'\[[^\]]+\]\([^)]+\)', '', line)
+        for line in _lines
+    )
+    text = re.sub(r'(^|[\s\(\[{])"', r'\1\u201c', text)
+    text = re.sub(r'"', r'\u201d', text)
+    text = re.sub(r"(\w)'(\w)", r"\1\u2019\2", text)
+    text = re.sub(r"'", r"\u2019", text)
     def capitalize_match(match): return ". " + match.group(1).upper()
     text = re.sub(r';\s*([a-z])', capitalize_match, text)
     text = text.replace("\u2014", " \u2013 ")
