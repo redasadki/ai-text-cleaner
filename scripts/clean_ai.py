@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AI Text Cleaner
-Version: 1.5
+Version: 1.6
 Author: Reda Sadki
 """
 import sys
@@ -9,7 +9,7 @@ import re
 import io
 import collections
 
-__version__ = "1.5"
+__version__ = "1.6"
 
 # FORCE UTF-8 HANDLING
 sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
@@ -17,11 +17,11 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='repla
 
 def fix_encoding_artifacts(text):
     replacements = {
-        'â€™': '’', 'â€œ': '“', 'â€': '”',
-        'â€': '—', 'â€': '–',
-        'Â': '', 'â€¦': '…', '€™': '’',
-        'Ã©': 'é', 'Ã ': 'à', 'Ã§': 'ç',
-        'Ã«': 'ë', 'Ã¯': 'ï', 'Ã´': 'ô'
+        '\u00e2\u20ac\u2122': '\u2019', '\u00e2\u20ac\u0153': '\u201c', '\u00e2\u20ac\u009d': '\u201d',
+        '\u00e2\u20ac\u0094': '\u2014', '\u00e2\u20ac\u0093': '\u2013',
+        '\u00c2': '', '\u00e2\u20ac\u00a6': '\u2026', '\u20ac\u2122': '\u2019',
+        '\u00c3\u00a9': '\u00e9', '\u00c3\u00a0': '\u00e0', '\u00c3\u00a7': '\u00e7',
+        '\u00c3\u00ab': '\u00eb', '\u00c3\u00af': '\u00ef', '\u00c3\u00b4': '\u00f4'
     }
     for bad, good in replacements.items():
         text = text.replace(bad, good)
@@ -141,12 +141,12 @@ def clean_text(text):
     text = re.sub(r'(\[\d+\])+', '', text)
     # Remove Perplexity footnote references: [^1], [^12], sequences like [^1][^2][^3]
     text = re.sub(r'(\[\^\d+\][ \t]*)+', '', text)
-    # Remove Perplexity inline citation links; preserve standalone reference list items
-    _standalone_ref = re.compile(r'^\s*(?:\d+\.|-|\*)\s+\[[^\]]+\]\([^)]+\)\s*$')
-    text = '\n'.join(
-        line if _standalone_ref.match(line)
-        else re.sub(r'\[[^\]]+\]\([^)]+\)', '', line)
-        for line in text.split('\n')
+    # Remove Markdown links whose URL is a Perplexity resource (file upload S3 links,
+    # perplexity.ai URLs). All other links — e.g. numbered reference lists — are kept.
+    text = re.sub(
+        r'\[([^\]]*)\]\(https?://[^)]*(?:perplexity\.ai|ppl-ai-)[^)]*\)',
+        '',
+        text
     )
     # Smart quotes: use variables + lambdas to avoid Python 3.12 re.sub bad-escape on \u in raw strings
     LDQUO = '\u201c'
@@ -232,7 +232,7 @@ def clean_text(text):
             for i, w in enumerate(words):
                 new_p.append(w)
                 if w and w[-1] in '.?!' and '\u201d' not in w:
-                    if i+1 < len(words) and words[i+1] and words[i+1][0].isupper():
+                    if i+1 < len(words) and words[i+1] and words[i+1][0].isupper():\
                         clean = re.sub(r'[^\w]', '', w)
                         if clean not in abbrevs:
                             new_p.append('\n\n')
