@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AI Text Cleaner
-Version: 1.6.1
+Version: 1.7
 Author: Reda Sadki
 """
 import sys
@@ -9,11 +9,40 @@ import re
 import io
 import collections
 
-__version__ = "1.6.1"
+__version__ = "1.7"
 
 # FORCE UTF-8 HANDLING
 sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+# Compiled patterns used in remove_trailing_cite_links
+_LIST_PREFIX = re.compile(r'^\s*(?:\d+\.|-|\*|\+|\u2022)\s+')
+_TRAILING_LINK = re.compile(r'\s+\[[^\]]+\]\([^)]+\)\s*$')
+_SOLE_LINK = re.compile(r'^\[[^\]]+\]\([^)]+\)$')
+_REF_LINK = re.compile(r'^\[[^\]]+\]\([^)]+\)\s+[-\u2013]')
+
+def remove_trailing_cite_links(text):
+    """Remove Markdown links that appear as the last token on a line after substantive
+    prose text. Preserves lines whose entire content (after stripping a list prefix) is
+    a single link, and lines where the link is followed by " - description" text
+    (bibliographic reference style)."""
+    result = []
+    for line in text.split('\n'):
+        if not _TRAILING_LINK.search(line):
+            result.append(line)
+            continue
+        content = _LIST_PREFIX.sub('', line).strip()
+        # Standalone reference: "- [Title](url)" or "1. [Title](url)"
+        if _SOLE_LINK.fullmatch(content):
+            result.append(line)
+            continue
+        # Annotated reference: "1. [Title](url) - description"
+        if _REF_LINK.match(content):
+            result.append(line)
+            continue
+        # Prose line with trailing citation -- remove the link
+        result.append(_TRAILING_LINK.sub('', line).rstrip())
+    return '\n'.join(result)
 
 def fix_encoding_artifacts(text):
     replacements = {
@@ -141,13 +170,17 @@ def clean_text(text):
     text = re.sub(r'(\[\d+\])+', '', text)
     # Remove Perplexity footnote references: [^1], [^12], sequences like [^1][^2][^3]
     text = re.sub(r'(\[\^\d+\][ \t]*)+', '', text)
-    # Remove Markdown links whose URL is a Perplexity resource (file upload S3 links,
-    # perplexity.ai URLs). All other links -- e.g. numbered reference lists -- are kept.
+    # Remove Markdown links whose URL is a Perplexity-hosted resource
+    # (perplexity.ai domain or ppl-ai-* S3 upload buckets)
     text = re.sub(
         r'\[([^\]]*)\]\(https?://[^)]*(?:perplexity\.ai|ppl-ai-)[^)]*\)',
         '',
         text
     )
+    # Remove trailing end-of-line citation links (any domain) that Perplexity appends
+    # to prose paragraphs and list items, while preserving standalone reference list
+    # items and annotated bibliography entries.
+    text = remove_trailing_cite_links(text)
     # Smart quotes: use variables + lambdas to avoid Python 3.12 re.sub bad-escape on \u in raw strings
     LDQUO = '\u201c'
     RDQUO = '\u201d'
