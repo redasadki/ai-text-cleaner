@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AI Text Cleaner
-Version: 1.6
+Version: 1.6.1
 Author: Reda Sadki
 """
 import sys
@@ -9,7 +9,7 @@ import re
 import io
 import collections
 
-__version__ = "1.6"
+__version__ = "1.6.1"
 
 # FORCE UTF-8 HANDLING
 sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
@@ -142,7 +142,7 @@ def clean_text(text):
     # Remove Perplexity footnote references: [^1], [^12], sequences like [^1][^2][^3]
     text = re.sub(r'(\[\^\d+\][ \t]*)+', '', text)
     # Remove Markdown links whose URL is a Perplexity resource (file upload S3 links,
-    # perplexity.ai URLs). All other links — e.g. numbered reference lists — are kept.
+    # perplexity.ai URLs). All other links -- e.g. numbered reference lists -- are kept.
     text = re.sub(
         r'\[([^\]]*)\]\(https?://[^)]*(?:perplexity\.ai|ppl-ai-)[^)]*\)',
         '',
@@ -232,7 +232,7 @@ def clean_text(text):
             for i, w in enumerate(words):
                 new_p.append(w)
                 if w and w[-1] in '.?!' and '\u201d' not in w:
-                    if i+1 < len(words) and words[i+1] and words[i+1][0].isupper():\
+                    if i+1 < len(words) and words[i+1] and words[i+1][0].isupper():
                         clean = re.sub(r'[^\w]', '', w)
                         if clean not in abbrevs:
                             new_p.append('\n\n')
