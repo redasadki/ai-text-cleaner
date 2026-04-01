@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AI Text Cleaner
-Version: 1.2
+Version: 1.3
 Author: Reda Sadki
 """
 import sys
@@ -9,7 +9,7 @@ import re
 import io
 import collections
 
-__version__ = "1.2"
+__version__ = "1.3"
 
 # 1. FORCE UTF-8 HANDLING
 sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
@@ -17,8 +17,8 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='repla
 
 def fix_encoding_artifacts(text):
     replacements = {
-        'â€™': '’', 'â€œ': '“', 'â€\x9d': '”', 'â€': '”', 'â€“': '–', 'â€”': '—',
-        'Â': '', 'â€¦': '…', '€™': '’', 'Ã©': 'é', 'Ã ': 'à', 'Ã§': 'ç', 
+        'â€™': '\u2019', 'â€œ': '\u201c', 'â€\x9d': '\u201d', 'â€': '\u201d', 'â€"': '\u2013', 'â€"': '\u2014',
+        'Â': '', 'â€¦': '\u2026', '€™': '\u2019', 'Ã©': 'é', 'Ã ': 'à', 'Ã§': 'ç', 
         'Ã«': 'ë', 'Ã¯': 'ï', 'Ã´': 'ô'
     }
     for bad, good in replacements.items():
@@ -32,7 +32,7 @@ def is_table_like(line):
     2. It does NOT start with a list marker (1., *, -), unless the line starts with a pipe.
     """
     # 1. Check for unescaped pipe (negative lookbehind for backslash)
-    if not re.search(r'(?<!\\\\)\|', line):
+    if not re.search(r'(?<!\\\\)\\|', line):
         return False
         
     # 2. Reject if it starts with a list marker (e.g. "45.", "* ", "- ")
@@ -150,13 +150,17 @@ def clean_text(text):
     text = re.sub(r'\[cite_start\]|\[(?:cite|source):\s*[^\]]+\]', '', text)
     text = re.sub(r'\b(?:Artifact|Artefact|Screen|Section)\s+\d+\s*:\s*', '', text)
     text = re.sub(r'(\[\d+\])+', '', text)
-    text = re.sub(r'(^|[\s\(\[{])"', r'\1“', text)
-    text = re.sub(r'"', r'”', text)
-    text = re.sub(r"(\w)'(\w)", r"\1’\2", text)
-    text = re.sub(r"'", r"’", text)
+    # Remove Perplexity footnote references: one or more [^N] markers (with optional whitespace)
+    text = re.sub(r'(\[\^\d+\][ \t]*)+', '', text)
+    # Remove Perplexity inline citation links: [text](url)
+    text = re.sub(r'\[[^\]]+\]\([^)]+\)', '', text)
+    text = re.sub(r'(^|[\s\(\[{])"', r'\1\u201c', text)
+    text = re.sub(r'"', r'\u201d', text)
+    text = re.sub(r"(\w)'(\w)", r"\1\u2019\2", text)
+    text = re.sub(r"'", r"\u2019", text)
     def capitalize_match(match): return ". " + match.group(1).upper()
     text = re.sub(r';\s*([a-z])', capitalize_match, text)
-    text = text.replace("—", " – ")
+    text = text.replace("\u2014", " \u2013 ")
     text = text.replace("***", "")
     text = re.sub(r'(?m)^[ \t]*---+[ \t]*$', '', text)
 
@@ -225,7 +229,7 @@ def clean_text(text):
             new_p = []
             for i, w in enumerate(words):
                 new_p.append(w)
-                if w and w[-1] in '.?!' and '"' not in w and '”' not in w:
+                if w and w[-1] in '.?!' and '"' not in w and '\u201d' not in w:
                     if i+1 < len(words) and words[i+1] and words[i+1][0].isupper():
                          clean = re.sub(r'[^\w]', '', w)
                          if clean not in abbrevs: new_p.append('\n\n')
