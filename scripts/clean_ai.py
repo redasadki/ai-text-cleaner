@@ -181,9 +181,8 @@ def clean_text(text):
     text = re.sub(r'(\[\^\d+\][ \t]*)+', '', text)
     # Remove Perplexity inline citation links, preserving standalone reference list items
     text = remove_perplexity_inline_links(text)
-    # Smart quotes: use literal Unicode characters in replacement strings (not raw \u escapes)
-    # to avoid re.error: bad escape \u on Python 3.12+
-    text = re.sub(r'(^|[\s\(\[{])"', '\u20631\u201c', text)
+    # Smart quotes: use lambdas / literal Unicode chars in replacements (not raw \u escapes)
+    # Raw \u in re.sub replacement strings raises re.error: bad escape on Python 3.12+
     text = re.sub(r'(^|[\s\(\[{])"', lambda m: m.group(1) + '\u201c', text)
     text = re.sub(r'"', '\u201d', text)
     text = re.sub(r"(\w)'(\w)", lambda m: m.group(1) + '\u2019' + m.group(2), text)
