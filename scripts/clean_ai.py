@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AI Text Cleaner
-Version: 1.4
+Version: 1.4.1
 Author: Reda Sadki
 """
 import sys
@@ -9,7 +9,7 @@ import re
 import io
 import collections
 
-__version__ = "1.4"
+__version__ = "1.4.1"
 
 # 1. FORCE UTF-8 HANDLING
 sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
@@ -36,7 +36,7 @@ def is_table_like(line):
         return False
         
     # 2. Reject if it starts with a list marker (e.g. "45.", "* ", "- ")
-    if re.match(r'^\s*(\d+\.|[-*+•])\s+', line):
+    if re.match(r'^\s*(\d+\.|[-*+\u2022])\s+', line):
         return False
         
     return True
@@ -128,7 +128,7 @@ def clean_text(text):
     lines = text.split('\n')
     merged_lines = []
     i = 0
-    bullet_pat = re.compile(r'^(\s*)([-*+]|•|\d+\.?)\s*$')
+    bullet_pat = re.compile(r'^(\s*)([-*+]|\u2022|\d+\.?)\s*$')
     
     while i < len(lines):
         line = lines[i]
@@ -181,10 +181,13 @@ def clean_text(text):
     text = re.sub(r'(\[\^\d+\][ \t]*)+', '', text)
     # Remove Perplexity inline citation links, preserving standalone reference list items
     text = remove_perplexity_inline_links(text)
-    text = re.sub(r'(^|[\s\(\[{])"', r'\1\u201c', text)
-    text = re.sub(r'"', r'\u201d', text)
-    text = re.sub(r"(\w)'(\w)", r"\1\u2019\2", text)
-    text = re.sub(r"'", r"\u2019", text)
+    # Smart quotes: use literal Unicode characters in replacement strings (not raw \u escapes)
+    # to avoid re.error: bad escape \u on Python 3.12+
+    text = re.sub(r'(^|[\s\(\[{])"', '\u20631\u201c', text)
+    text = re.sub(r'(^|[\s\(\[{])"', lambda m: m.group(1) + '\u201c', text)
+    text = re.sub(r'"', '\u201d', text)
+    text = re.sub(r"(\w)'(\w)", lambda m: m.group(1) + '\u2019' + m.group(2), text)
+    text = re.sub(r"'", '\u2019', text)
     def capitalize_match(match): return ". " + match.group(1).upper()
     text = re.sub(r';\s*([a-z])', capitalize_match, text)
     text = text.replace("\u2014", " \u2013 ")
@@ -230,7 +233,7 @@ def clean_text(text):
         if not stripped: final.append(""); continue
         
         if not found_title:
-            if re.match(r'^\s*([-*+•]|\d+\.|\|)', line):
+            if re.match(r'^\s*([-*+\u2022]|\d+\.|\|)', line):
                  found_title = True 
             else:
                  if re.match(r'^#\s+', line):
@@ -238,8 +241,8 @@ def clean_text(text):
                      line = re.sub(r'^#\s+', '', line)
                  found_title = True; final.append(line); continue
 
-        if re.match(r'^[ \t]*[*•]\s+', line):
-            line = re.sub(r'^([ \t]*)[*•]\s+', r'\1- ', line)
+        if re.match(r'^[ \t]*[*\u2022]\s+', line):
+            line = re.sub(r'^([ \t]*)[*\u2022]\s+', r'\1- ', line)
         if re.match(r'^\s*\*\*([^*\r\n]+)\*\*\s*$', line):
             line = re.sub(r'^\s*\*\*([^*\r\n]+)\*\*\s*$', r'## \1', line)
         if re.match(r'^(#{1,6}\s+.+?):\s*$', line):
@@ -247,7 +250,7 @@ def clean_text(text):
         if promote and re.match(r'^#+\s+', line):
             line = re.sub(r'^#', '', line)
 
-        is_struct = re.match(r'^\s*([-*+]|•|\d+\.|#|\|)', line)
+        is_struct = re.match(r'^\s*([-*+]|\u2022|\d+\.|#|\|)', line)
         if is_struct:
             final.append(line)
         else:
