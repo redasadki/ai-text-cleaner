@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AI Text Cleaner
-Version: 1.3
+Version: 1.4
 Author: Reda Sadki
 """
 import sys
@@ -9,7 +9,7 @@ import re
 import io
 import collections
 
-__version__ = "1.3"
+__version__ = "1.4"
 
 # 1. FORCE UTF-8 HANDLING
 sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
@@ -93,6 +93,33 @@ def normalize_table_block(block_lines):
 
     return final_lines
 
+def remove_perplexity_inline_links(text):
+    """
+    Remove Perplexity inline citation links embedded in prose,
+    but preserve standalone reference list items where the entire
+    line content is a single Markdown link (numbered or bulleted).
+
+    Preserved examples:
+        21. [Can higher-proficiency...](https://tandfonline.com/...)
+        - [Project homepage](https://github.com/...)
+        * [Some reference](https://example.com)
+
+    Removed examples (inline in prose):
+        The study found significant impact [Source](https://example.com).
+        See [this article](https://news.com) for details.
+    """
+    standalone_ref = re.compile(
+        r'^\s*(?:\d+\.|-|\*)\s+\[[^\]]+\]\([^)]+\)\s*$'
+    )
+    lines = text.split('\n')
+    result = []
+    for line in lines:
+        if standalone_ref.match(line):
+            result.append(line)
+        else:
+            result.append(re.sub(r'\[[^\]]+\]\([^)]+\)', '', line))
+    return '\n'.join(result)
+
 def clean_text(text):
     # PHASE 0: Encoding
     text = fix_encoding_artifacts(text)
@@ -152,8 +179,8 @@ def clean_text(text):
     text = re.sub(r'(\[\d+\])+', '', text)
     # Remove Perplexity footnote references: one or more [^N] markers (with optional whitespace)
     text = re.sub(r'(\[\^\d+\][ \t]*)+', '', text)
-    # Remove Perplexity inline citation links: [text](url)
-    text = re.sub(r'\[[^\]]+\]\([^)]+\)', '', text)
+    # Remove Perplexity inline citation links, preserving standalone reference list items
+    text = remove_perplexity_inline_links(text)
     text = re.sub(r'(^|[\s\(\[{])"', r'\1\u201c', text)
     text = re.sub(r'"', r'\u201d', text)
     text = re.sub(r"(\w)'(\w)", r"\1\u2019\2", text)
