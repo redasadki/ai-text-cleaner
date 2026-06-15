@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AI Text Cleaner
-Version: 1.8
+Version: 1.9
 Author: Reda Sadki
 """
 import sys
@@ -9,7 +9,7 @@ import re
 import io
 import collections
 
-__version__ = "1.8"
+__version__ = "1.9"
 
 # FORCE UTF-8 HANDLING
 sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
@@ -32,15 +32,12 @@ def remove_trailing_cite_links(text):
             result.append(line)
             continue
         content = _LIST_PREFIX.sub('', line).strip()
-        # Standalone reference: "- [Title](url)" or "1. [Title](url)"
         if _SOLE_LINK.fullmatch(content):
             result.append(line)
             continue
-        # Annotated reference: "1. [Title](url) - description"
         if _REF_LINK.match(content):
             result.append(line)
             continue
-        # Prose line with trailing citation -- remove the link
         result.append(_TRAILING_LINK.sub('', line).rstrip())
     return '\n'.join(result)
 
@@ -118,66 +115,90 @@ _RDQUO = '\u201d'
 def split_prose_line(line):
     """Split a prose line into paragraph blocks at sentence boundaries.
 
-    Handles three cases that the previous word-by-word approach missed:
-
+    Quote model
+    -----------
     CASE A  Sentence before a block quote
-            "He said the plainest thing. \u201cThere is no..."
-            The period ends the sentence, but the next token starts with \u201c
-            (an opening curly-quote), not an alpha character.  The fix strips
-            leading curly-quotes before testing whether the next word is uppercase.
+            Plain prose ending with .?! where the very next token opens a quote.
+            Strip leading curly-quotes from the next token before the uppercase
+            test so the split is triggered correctly.
 
     CASE B  Sentences INSIDE a block quote must NOT be split
-            "\u201cNo GLF without you. That is why we are here.\u201d"
-            The old code only suppressed splitting when the period token itself
-            contained \u201d.  The fix tracks an inside_quote boolean across tokens
-            and skips the .?! check while inside a quote.
+            Track inside_quote across tokens and skip the .?! check while True.
 
-    CASE C  Sentence AFTER a closing block quote
-            "...\u201d This is not a slogan."
-            The closing-quote token does not end with .?! so no split was triggered.
-            The fix: whenever close-count exceeds open-count on a token, set
-            inside_quote = False and immediately insert a paragraph break if the
-            next word starts a new sentence.
+    CASE C  Sentence AFTER a standalone closing block quote
+            A closing-quote token does not end with .?!  When close-count exceeds
+            open-count, check whether the line has any further opening quote.
+            If it does, this is an interrupted/attributed quotation -> stay in
+            one paragraph (set seen_close = True for the attribution gap).
+            If it does not, the quote block is complete -> split after it.
+
+    CASE D  Attribution gap between a closed and a reopened quote
+            After a CASE C non-split, seen_close = True.  When prose in the
+            attribution gap ends with .?! and the next token opens a quote,
+            suppress the split and clear seen_close (the gap is now closed).
     """
     abbrevs = {'Mr', 'Mrs', 'Ms', 'Dr', 'Prof', 'Sr', 'Jr', 'vs', 'etc',
                'Fig', 'al', 'e.g', 'i.e'}
 
     words = line.split(' ')
+    n = len(words)
+
+    # Pre-compute positions of all opening quotes for lookahead
+    open_positions = [i for i, w in enumerate(words) if _LDQUO in w]
+
+    def opening_quote_after(idx):
+        """Return True if any opening quote appears after position idx."""
+        for op in open_positions:
+            if op > idx:
+                return True
+        return False
+
     new_p = []
     inside_quote = False
+    seen_close = False  # True while in an attribution gap between a close and reopen
 
     for i, w in enumerate(words):
         new_p.append(w)
 
-        # Update quote-tracking for this token
         open_count  = w.count(_LDQUO)
         close_count = w.count(_RDQUO)
 
         if open_count > close_count:
-            # We have entered a block quote on this token
+            # Entering a quote; attribution gap (if any) is now closed
             inside_quote = True
-
-        elif close_count > open_count:
-            # We have exited a block quote on this token (CASE C)
-            inside_quote = False
-            if i + 1 < len(words):
-                nxt = words[i + 1]
-                nxt_stripped = nxt.lstrip(_LDQUO)
-                if nxt_stripped and nxt_stripped[0].isupper():
-                    new_p.append('\n\n')
-            # Skip the normal .?! check for this token
+            seen_close = False
             continue
 
-        # Normal sentence-boundary check - only outside a block quote (CASE B fix)
+        elif close_count > open_count:
+            # Exiting a quote (CASE C)
+            inside_quote = False
+            if i + 1 < n:
+                nxt_stripped = words[i + 1].lstrip(_LDQUO)
+                if nxt_stripped and nxt_stripped[0].isupper():
+                    if opening_quote_after(i):
+                        # More quote ahead -> attribution gap, do not split
+                        seen_close = True
+                    else:
+                        # Quote block is complete -> split
+                        new_p.append('\n\n')
+                        seen_close = False
+            continue
+
+        # Normal sentence-boundary check, only outside a quote
         if not inside_quote and w and w[-1] in '.?!':
-            if i + 1 < len(words):
+            if i + 1 < n:
                 nxt = words[i + 1]
-                # Strip a possible leading curly-quote before the uppercase test (CASE A fix)
                 nxt_stripped = nxt.lstrip(_LDQUO)
                 if nxt_stripped and nxt_stripped[0].isupper():
                     clean = re.sub(r'[^\w]', '', w)
-                    if clean not in abbrevs:
-                        new_p.append('\n\n')
+                    if clean in abbrevs:
+                        continue
+                    # CASE D: attribution gap ending before a reopened quote
+                    if seen_close and nxt.startswith(_LDQUO):
+                        seen_close = False
+                        continue
+                    # CASE A: plain prose sentence before an opening quote
+                    new_p.append('\n\n')
 
     return ' '.join(new_p).replace(' \n\n ', '\n\n')
 
@@ -238,20 +259,13 @@ def clean_text(text):
     text = re.sub(r'\[cite_start\]|\[(?:cite|source):\s*[^\]]+\]', '', text)
     text = re.sub(r'\b(?:Artifact|Artefact|Screen|Section)\s+\d+\s*:\s*', '', text)
     text = re.sub(r'(\[\d+\])+', '', text)
-    # Remove Perplexity footnote references: [^1], [^12], sequences like [^1][^2][^3]
     text = re.sub(r'(\[\^\d+\][ \t]*)+', '', text)
-    # Remove Markdown links whose URL is a Perplexity-hosted resource
-    # (perplexity.ai domain or ppl-ai-* S3 upload buckets)
     text = re.sub(
         r'\[([^\]]*)\]\(https?://[^)]*(?:perplexity\.ai|ppl-ai-)[^)]*\)',
         '',
         text
     )
-    # Remove trailing end-of-line citation links (any domain) that Perplexity appends
-    # to prose paragraphs and list items, while preserving standalone reference list
-    # items and annotated bibliography entries.
     text = remove_trailing_cite_links(text)
-    # Smart quotes: use variables + lambdas to avoid Python 3.12 re.sub bad-escape on \u in raw strings
     LDQUO = '\u201c'
     RDQUO = '\u201d'
     RSQUO = '\u2019'
