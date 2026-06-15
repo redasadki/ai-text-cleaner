@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AI Text Cleaner
-Version: 1.7
+Version: 1.8
 Author: Reda Sadki
 """
 import sys
@@ -9,7 +9,7 @@ import re
 import io
 import collections
 
-__version__ = "1.7"
+__version__ = "1.8"
 
 # FORCE UTF-8 HANDLING
 sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
@@ -24,7 +24,7 @@ _REF_LINK = re.compile(r'^\[[^\]]+\]\([^)]+\)\s+[-\u2013]')
 def remove_trailing_cite_links(text):
     """Remove Markdown links that appear as the last token on a line after substantive
     prose text. Preserves lines whose entire content (after stripping a list prefix) is
-    a single link, and lines where the link is followed by " - description" text
+    a single link, and lines where the link is followed by \" - description\" text
     (bibliographic reference style)."""
     result = []
     for line in text.split('\n'):
@@ -110,6 +110,76 @@ def normalize_table_block(block_lines):
             row_chunk.append("")
         final_lines.append('| ' + ' | '.join(row_chunk) + ' |')
     return final_lines
+
+# Opening and closing curly-quote characters produced by Phase 2
+_LDQUO = '\u201c'
+_RDQUO = '\u201d'
+
+def split_prose_line(line):
+    """Split a prose line into paragraph blocks at sentence boundaries.
+
+    Handles three cases that the previous word-by-word approach missed:
+
+    CASE A  Sentence before a block quote
+            "He said the plainest thing. \u201cThere is no..."
+            The period ends the sentence, but the next token starts with \u201c
+            (an opening curly-quote), not an alpha character.  The fix strips
+            leading curly-quotes before testing whether the next word is uppercase.
+
+    CASE B  Sentences INSIDE a block quote must NOT be split
+            "\u201cNo GLF without you. That is why we are here.\u201d"
+            The old code only suppressed splitting when the period token itself
+            contained \u201d.  The fix tracks an inside_quote boolean across tokens
+            and skips the .?! check while inside a quote.
+
+    CASE C  Sentence AFTER a closing block quote
+            "...\u201d This is not a slogan."
+            The closing-quote token does not end with .?! so no split was triggered.
+            The fix: whenever close-count exceeds open-count on a token, set
+            inside_quote = False and immediately insert a paragraph break if the
+            next word starts a new sentence.
+    """
+    abbrevs = {'Mr', 'Mrs', 'Ms', 'Dr', 'Prof', 'Sr', 'Jr', 'vs', 'etc',
+               'Fig', 'al', 'e.g', 'i.e'}
+
+    words = line.split(' ')
+    new_p = []
+    inside_quote = False
+
+    for i, w in enumerate(words):
+        new_p.append(w)
+
+        # Update quote-tracking for this token
+        open_count  = w.count(_LDQUO)
+        close_count = w.count(_RDQUO)
+
+        if open_count > close_count:
+            # We have entered a block quote on this token
+            inside_quote = True
+
+        elif close_count > open_count:
+            # We have exited a block quote on this token (CASE C)
+            inside_quote = False
+            if i + 1 < len(words):
+                nxt = words[i + 1]
+                nxt_stripped = nxt.lstrip(_LDQUO)
+                if nxt_stripped and nxt_stripped[0].isupper():
+                    new_p.append('\n\n')
+            # Skip the normal .?! check for this token
+            continue
+
+        # Normal sentence-boundary check - only outside a block quote (CASE B fix)
+        if not inside_quote and w and w[-1] in '.?!':
+            if i + 1 < len(words):
+                nxt = words[i + 1]
+                # Strip a possible leading curly-quote before the uppercase test (CASE A fix)
+                nxt_stripped = nxt.lstrip(_LDQUO)
+                if nxt_stripped and nxt_stripped[0].isupper():
+                    clean = re.sub(r'[^\w]', '', w)
+                    if clean not in abbrevs:
+                        new_p.append('\n\n')
+
+    return ' '.join(new_p).replace(' \n\n ', '\n\n')
 
 def clean_text(text):
     # PHASE 0: Encoding
@@ -259,17 +329,7 @@ def clean_text(text):
         if is_struct:
             final.append(line)
         else:
-            abbrevs = {'Mr', 'Mrs', 'Ms', 'Dr', 'Prof', 'Sr', 'Jr', 'vs', 'etc', 'Fig', 'al', 'e.g', 'i.e'}
-            words = line.split(' ')
-            new_p = []
-            for i, w in enumerate(words):
-                new_p.append(w)
-                if w and w[-1] in '.?!' and '\u201d' not in w:
-                    if i+1 < len(words) and words[i+1] and words[i+1][0].isupper():
-                        clean = re.sub(r'[^\w]', '', w)
-                        if clean not in abbrevs:
-                            new_p.append('\n\n')
-            final.append(" ".join(new_p).replace(' \n\n ', '\n\n'))
+            final.append(split_prose_line(line))
 
     return "\n".join(final)
 
