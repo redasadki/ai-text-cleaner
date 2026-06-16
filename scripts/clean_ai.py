@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AI Text Cleaner
-Version: 1.9
+Version: 1.10
 Author: Reda Sadki
 """
 import sys
@@ -9,7 +9,7 @@ import re
 import io
 import collections
 
-__version__ = "1.9"
+__version__ = "1.10"
 
 # FORCE UTF-8 HANDLING
 sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
@@ -20,15 +20,24 @@ _LIST_PREFIX = re.compile(r'^\s*(?:\d+\.|-|\*|\+|\u2022)\s+')
 _TRAILING_LINK = re.compile(r'\s+\[[^\]]+\]\([^)]+\)\s*$')
 _SOLE_LINK = re.compile(r'^\[[^\]]+\]\([^)]+\)$')
 _REF_LINK = re.compile(r'^\[[^\]]+\]\([^)]+\)\s+[-\u2013]')
+# DOI trailing link: preserved in remove_trailing_cite_links
+_DOI_TRAILING = re.compile(
+    r'\s+\[https?://(?:dx\.)?doi\.org/[^\]]+\]\(https?://(?:dx\.)?doi\.org/[^)]+\)\s*$',
+    re.IGNORECASE
+)
 
 def remove_trailing_cite_links(text):
     """Remove Markdown links that appear as the last token on a line after substantive
     prose text. Preserves lines whose entire content (after stripping a list prefix) is
-    a single link, and lines where the link is followed by \" - description\" text
-    (bibliographic reference style)."""
+    a single link, lines where the link is followed by \" - description\" text
+    (bibliographic reference style), and lines whose trailing link is a DOI link."""
     result = []
     for line in text.split('\n'):
         if not _TRAILING_LINK.search(line):
+            result.append(line)
+            continue
+        # Preserve lines whose trailing link is a DOI (bibliographic reference)
+        if _DOI_TRAILING.search(line):
             result.append(line)
             continue
         content = _LIST_PREFIX.sub('', line).strip()
@@ -108,9 +117,83 @@ def normalize_table_block(block_lines):
         final_lines.append('| ' + ' | '.join(row_chunk) + ' |')
     return final_lines
 
-# Opening and closing curly-quote characters produced by Phase 2
+# ── Quote characters produced by Phase 2 ────────────────────────────────────────
 _LDQUO = '\u201c'
 _RDQUO = '\u201d'
+
+# ── Reference-block detection ────────────────────────────────────────────────────
+# Headings that introduce a reference/bibliography section
+_REF_HEADING = re.compile(
+    r'^\s*(?:#{1,6}\s*)?(?:\*\*)?\s*'
+    r'(references|bibliography|sources|further\s+reading|works\s+cited|citations|learn\s+more|see\s+also|read\s+more)'
+    r'\s*:?\s*(?:\*\*)?\s*',
+    re.IGNORECASE
+)
+# Year token that anchors a reference entry: (2024), (2024a), (1995)
+_REF_YEAR = re.compile(r'\((?:1[5-9]|20)\d{2}[a-z]?\)')
+# DOI pattern (strong signal that a line contains a bibliographic reference)
+_DOI_LIKE = re.compile(r'doi\.org|10\.\d{4,9}/', re.IGNORECASE)
+
+
+def find_reference_entry_starts(text):
+    """Return character offsets where each reference entry begins.
+
+    Anchors on a (YYYY) year token and walks backwards over author-name tokens
+    (capitalised surnames, single-letter initials, and connectors 'and', '&',
+    'et', 'al'). Stops at any lowercase word so publisher names and prose text
+    before the author list are not absorbed into the entry.
+    """
+    starts = []
+    connectors = {'and', '&', 'et', 'al', 'al.'}
+    for ym in _REF_YEAR.finditer(text):
+        seg = text[:ym.start()]
+        tokens = list(re.finditer(r'\S+', seg))
+        start_off = ym.start()
+        i = len(tokens) - 1
+        while i >= 0:
+            tok = tokens[i].group()
+            low = tok.lower().strip(',')
+            is_initial   = bool(re.fullmatch(r'[A-Z]\.', tok.strip(',')))
+            is_surname   = bool(re.fullmatch(r"[A-Z][\w\u00C0-\u017F''\-]*,?", tok))
+            is_connector = low in connectors
+            if is_initial or is_surname or is_connector:
+                start_off = tokens[i].start()
+                i -= 1
+                continue
+            break
+        # Trim any leading separators
+        while start_off < len(text) and text[start_off] in ' ,.&\t':
+            start_off += 1
+        # Only accept if the entry genuinely begins with a capitalised surname
+        if start_off < len(text) and text[start_off].isupper():
+            starts.append(start_off)
+    return sorted(set(starts))
+
+
+def split_reference_block(text):
+    """Split a merged reference-section string into one entry per reference.
+
+    Entry boundaries are detected by find_reference_entry_starts().  Text before
+    the first detected entry (e.g. a residual heading fragment) is preserved as a
+    separate item.  Each entry is returned as a stripped string; entries are NOT
+    passed through split_prose_line so author initials, year tokens, publisher
+    names, and DOI links are left intact.
+    """
+    starts = find_reference_entry_starts(text)
+    if not starts:
+        return [text.strip()]
+    entries = []
+    if starts[0] > 0:
+        lead = text[:starts[0]].strip(' .,&\t')
+        if lead:
+            entries.append(lead)
+    for idx, st in enumerate(starts):
+        end = starts[idx + 1] if idx + 1 < len(starts) else len(text)
+        entry = text[st:end].strip()
+        if entry:
+            entries.append(entry)
+    return entries
+
 
 def split_prose_line(line):
     """Split a prose line into paragraph blocks at sentence boundaries.
@@ -118,78 +201,88 @@ def split_prose_line(line):
     Quote model
     -----------
     CASE A  Sentence before a block quote
-            Plain prose ending with .?! where the very next token opens a quote.
             Strip leading curly-quotes from the next token before the uppercase
-            test so the split is triggered correctly.
+            test so the split is triggered when prose ends and a quote begins.
 
-    CASE B  Sentences INSIDE a block quote must NOT be split
-            Track inside_quote across tokens and skip the .?! check while True.
+    CASE B  Sentences INSIDE a block quote must NOT be split.
+            Tracked via inside_quote flag.
 
     CASE C  Sentence AFTER a standalone closing block quote
-            A closing-quote token does not end with .?!  When close-count exceeds
-            open-count, check whether the line has any further opening quote.
-            If it does, this is an interrupted/attributed quotation -> stay in
-            one paragraph (set seen_close = True for the attribution gap).
-            If it does not, the quote block is complete -> split after it.
+            When close-count > open-count on a token, check for further opening
+            quotes on the same line.  If found, enter attribution-gap mode
+            (seen_close = True).  If not, split after the quote.
 
     CASE D  Attribution gap between a closed and a reopened quote
-            After a CASE C non-split, seen_close = True.  When prose in the
-            attribution gap ends with .?! and the next token opens a quote,
-            suppress the split and clear seen_close (the gap is now closed).
+            When seen_close is True and the next token opens a quote, suppress
+            the split (the attribution sentence connects two quote fragments).
+
+    CASE E  Self-contained inline quote token (open == close > 0, e.g. \u201cWord,\u201d)
+            If any opening quote follows later on the line, unconditionally enter
+            attribution-gap mode.  Otherwise split after the token if the next word
+            starts uppercase.
+
+    INITIAL Single uppercase letter tokens (author initials, e.g. L., E., D.)
+            are never treated as sentence ends.
     """
     abbrevs = {'Mr', 'Mrs', 'Ms', 'Dr', 'Prof', 'Sr', 'Jr', 'vs', 'etc',
                'Fig', 'al', 'e.g', 'i.e'}
 
     words = line.split(' ')
     n = len(words)
-
-    # Pre-compute positions of all opening quotes for lookahead
     open_positions = [i for i, w in enumerate(words) if _LDQUO in w]
 
     def opening_quote_after(idx):
-        """Return True if any opening quote appears after position idx."""
-        for op in open_positions:
-            if op > idx:
-                return True
-        return False
+        """True if any opening curly-quote appears after position idx."""
+        return any(op > idx for op in open_positions)
 
     new_p = []
     inside_quote = False
-    seen_close = False  # True while in an attribution gap between a close and reopen
+    seen_close = False
 
     for i, w in enumerate(words):
         new_p.append(w)
+        oc = w.count(_LDQUO)
+        cc = w.count(_RDQUO)
 
-        open_count  = w.count(_LDQUO)
-        close_count = w.count(_RDQUO)
-
-        if open_count > close_count:
-            # Entering a quote; attribution gap (if any) is now closed
+        if oc > cc:
+            # Entering a multi-token quote span
             inside_quote = True
             seen_close = False
             continue
 
-        elif close_count > open_count:
-            # Exiting a quote (CASE C)
+        elif cc > oc:
+            # Exiting a multi-token quote span (CASE C)
             inside_quote = False
             if i + 1 < n:
-                nxt_stripped = words[i + 1].lstrip(_LDQUO)
-                if nxt_stripped and nxt_stripped[0].isupper():
+                ns = words[i + 1].lstrip(_LDQUO)
+                if ns and ns[0].isupper():
                     if opening_quote_after(i):
-                        # More quote ahead -> attribution gap, do not split
                         seen_close = True
                     else:
-                        # Quote block is complete -> split
                         new_p.append('\n\n')
                         seen_close = False
             continue
 
-        # Normal sentence-boundary check, only outside a quote
+        elif oc == cc and oc > 0:
+            # Self-contained inline quote token (CASE E)
+            if opening_quote_after(i):
+                # Attribution gap: another quote follows -> stay in one paragraph
+                seen_close = True
+            else:
+                # Standalone inline quote -> split if next word starts a sentence
+                if i + 1 < n:
+                    ns = words[i + 1].lstrip(_LDQUO)
+                    if ns and ns[0].isupper():
+                        new_p.append('\n\n')
+                        seen_close = False
+            continue
+
+        # Normal sentence-boundary check (outside a quote)
         if not inside_quote and w and w[-1] in '.?!':
             if i + 1 < n:
                 nxt = words[i + 1]
-                nxt_stripped = nxt.lstrip(_LDQUO)
-                if nxt_stripped and nxt_stripped[0].isupper():
+                ns = nxt.lstrip(_LDQUO)
+                if ns and ns[0].isupper():
                     clean = re.sub(r'[^\w]', '', w)
                     if clean in abbrevs:
                         continue
@@ -197,10 +290,14 @@ def split_prose_line(line):
                     if seen_close and nxt.startswith(_LDQUO):
                         seen_close = False
                         continue
-                    # CASE A: plain prose sentence before an opening quote
+                    # INITIAL: single uppercase letter = author initial, never split
+                    if re.fullmatch(r'[A-Z]', clean):
+                        continue
+                    # CASE A: plain prose sentence (or sentence before opening quote)
                     new_p.append('\n\n')
 
     return ' '.join(new_p).replace(' \n\n ', '\n\n')
+
 
 def clean_text(text):
     # PHASE 0: Encoding
@@ -342,8 +439,26 @@ def clean_text(text):
         is_struct = re.match(r'^\s*([-*+]|\u2022|\d+\.|#|\|)', line)
         if is_struct:
             final.append(line)
-        else:
-            final.append(split_prose_line(line))
+            continue
+
+        # ── Reference-block routing (before prose splitting) ────────────────────
+        ref_m = _REF_HEADING.match(line)
+        if ref_m:
+            heading_text = line[:ref_m.end()].strip().rstrip(':')
+            body = line[ref_m.end():].strip()
+            if body and _DOI_LIKE.search(body):
+                # Heading-gated reference block with at least one DOI
+                if heading_text:
+                    final.append(heading_text + ':')
+                final.extend(split_reference_block(body))
+                continue
+        if _DOI_LIKE.search(line):
+            # No heading but line contains a DOI -> treat as reference block
+            final.extend(split_reference_block(line))
+            continue
+
+        # ── Normal prose splitting ──────────────────────────────────────────────
+        final.append(split_prose_line(line))
 
     return "\n".join(final)
 
