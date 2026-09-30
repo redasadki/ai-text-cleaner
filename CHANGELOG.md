@@ -33,6 +33,9 @@ The working copy used for this fix already contained changes that had not been p
 - `split_prose_line()`: leading `*` is stripped, together with opening curly quotes, before the uppercase test on the next word.
 - Phase 4: lines starting with `>` (block quotes) are treated as structural and are not split.
 - Phase 4: a line with a DOI but no reference heading is routed to `split_reference_block()` only if it also contains author-year entry boundaries. A DOI cited inline in ordinary prose goes through normal prose splitting.
+- Phase 4 title handling: the first content line is now always an H1 (`# ` is added if missing). The v1.10 `promote` logic, which removed `# ` from the title and demoted every later heading by one level, is removed.
+- Phase 4: bold-only lines (`**Title**`) are no longer converted to `##` headings.
+- Phase 4: a line starting with `**` is no longer treated as a `*` list item, so bold opening text goes through prose splitting.
 
 ### Known limitation (unchanged)
 
