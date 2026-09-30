@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AI Text Cleaner
-Version: 1.10
+Version: 1.11
 Author: Reda Sadki
 """
 import sys
@@ -9,7 +9,7 @@ import re
 import io
 import collections
 
-__version__ = "1.10"
+__version__ = "1.11"
 
 # FORCE UTF-8 HANDLING
 sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
@@ -90,10 +90,98 @@ def detect_column_count(lines, all_cells):
     header_clean = [c for c in header_raw if c.strip()]
     return max(2, len(header_clean))
 
-def normalize_table_block(block_lines):
+def _is_separator_row(line):
+    """True if the line is a Markdown table separator row such as |---|:---:|."""
+    s = line.strip()
+    return '|' in s and '-' in s and set(s).issubset({'|', '-', ' ', ':'})
+
+def _split_row_cells(line):
+    """Split a pipe-delimited row into cells, keeping empty cells and escaped pipes."""
+    s = line.strip()
+    if s.startswith('|'):
+        s = s[1:]
+    if s.endswith('|') and not s.endswith('\\|'):
+        s = s[:-1]
+    return [c.strip() for c in re.split(r'(?<!\\)\|', s)]
+
+def _separator_cell(cell):
+    """Normalise a separator cell to --- while keeping column alignment colons."""
+    c = cell.strip()
+    left = c.startswith(':')
+    right = c.endswith(':') and len(c) > 1
+    return (':' if left else '') + '---' + (':' if right else '')
+
+def split_table_block(block_lines):
+    """Split a buffered run of table lines into one list of lines per table.
+
+    Phase 3 keeps blank lines inside the buffer so that tables whose rows are
+    separated by blank lines can be repaired. As a result, several complete
+    tables separated only by a blank line arrive here as one buffer. A new
+    table starts at the header row that sits directly above every separator
+    row after the first one.
+    """
+    rows = [l for l in block_lines if l.strip()]
+    if not rows:
+        return []
+    sep_positions = [i for i, l in enumerate(rows) if _is_separator_row(l)]
+    starts = [0]
+    for pos in sep_positions[1:]:
+        header_pos = pos - 1
+        if header_pos > starts[-1] and not _is_separator_row(rows[header_pos]):
+            starts.append(header_pos)
+    tables = []
+    for idx, st in enumerate(starts):
+        end = starts[idx + 1] if idx + 1 < len(starts) else len(rows)
+        tables.append(rows[st:end])
+    return tables
+
+def _is_closed_row(line):
+    """True if the row starts with a pipe and ends with an unescaped pipe."""
+    s = line.strip()
+    return s.startswith('|') and s.endswith('|') and not s.endswith('\\|')
+
+def _normalize_wellformed_table(lines):
+    """Rebuild a table row by row when it has a header row, a separator row,
+    and body rows that each open and close with a pipe and have exactly as
+    many cells as the header. Empty cells, escaped pipes, and alignment
+    colons are preserved. Returns None when the table is not well formed,
+    so the caller can fall back to cell reflow."""
+    if len(lines) < 2 or not _is_separator_row(lines[1]) or _is_separator_row(lines[0]):
+        return None
+    if not _is_closed_row(lines[0]):
+        return None
+    header = _split_row_cells(lines[0])
+    col_count = len(header)
+    sep_cells = _split_row_cells(lines[1])
+    if col_count < 1 or len(sep_cells) != col_count:
+        return None
+    body = []
+    for line in lines[2:]:
+        if _is_separator_row(line):
+            return None
+        # A row that does not open and close with a pipe, or whose cell count
+        # differs from the header, is a fragment of a row broken across lines.
+        if not _is_closed_row(line):
+            return None
+        cells = _split_row_cells(line)
+        if len(cells) != col_count:
+            return None
+        body.append(cells)
+    out = ['| ' + ' | '.join(header) + ' |',
+           '|' + '|'.join(_separator_cell(c) for c in sep_cells) + '|']
+    for cells in body:
+        out.append('| ' + ' | '.join(cells) + ' |')
+    return out
+
+def _normalize_single_table(block_lines):
     lines = [l.strip() for l in block_lines if l.strip()]
     if not lines:
         return []
+    wellformed = _normalize_wellformed_table(lines)
+    if wellformed is not None:
+        return wellformed
+    # Fallback: reflow all cells to repair tables whose rows are broken
+    # across several lines.
     all_content_cells = []
     for line in lines:
         if set(line).issubset({'|', '-', ' ', ':'}):
@@ -103,7 +191,7 @@ def normalize_table_block(block_lines):
             if c.strip():
                 all_content_cells.append(c.strip())
     if not all_content_cells:
-        return block_lines
+        return lines
     col_count = detect_column_count(lines, all_content_cells)
     final_lines = []
     header_cells = all_content_cells[:col_count]
@@ -116,6 +204,17 @@ def normalize_table_block(block_lines):
             row_chunk.append("")
         final_lines.append('| ' + ' | '.join(row_chunk) + ' |')
     return final_lines
+
+def normalize_table_block(block_lines):
+    """Normalise a buffered run of table lines. Consecutive tables separated
+    only by blank lines are split first and normalised independently, with
+    one blank line between them."""
+    out = []
+    for table in split_table_block(block_lines):
+        if out:
+            out.append('')
+        out.extend(_normalize_single_table(table))
+    return out
 
 # ── Quote characters produced by Phase 2 ────────────────────────────────────────
 _LDQUO = '\u201c'
@@ -253,8 +352,14 @@ def split_prose_line(line):
         elif cc > oc:
             # Exiting a multi-token quote span (CASE C)
             inside_quote = False
-            if i + 1 < n:
-                ns = words[i + 1].lstrip(_LDQUO)
+            # A quote ending in a comma before the closing mark (e.g. “X,” Name said)
+            # is a dialogue tag continuation, not a sentence boundary — the capitalised
+            # word that follows is the speaker's name, not a new sentence. Only treat
+            # this as a sentence boundary when the quote token ends with terminal
+            # punctuation (., ?, !) before the closing quote mark(s).
+            ends_sentence = bool(re.search(r'[.?!]' + _RDQUO + r'*$', w))
+            if i + 1 < n and ends_sentence:
+                ns = words[i + 1].lstrip(_LDQUO + '*')
                 if ns and ns[0].isupper():
                     if opening_quote_after(i):
                         seen_close = True
@@ -265,13 +370,18 @@ def split_prose_line(line):
 
         elif oc == cc and oc > 0:
             # Self-contained inline quote token (CASE E)
-            if opening_quote_after(i):
+            # Only treat as a mid-sentence attribution gap if this token does NOT
+            # end the sentence (no ., ?, ! before the closing quote). A token like
+            # “help.” ends a sentence even though quotes open/close within it, so
+            # it must still be eligible for a following-word split.
+            ends_sentence = bool(re.search(r'[.?!]' + _RDQUO + r'*$', w))
+            if opening_quote_after(i) and not ends_sentence:
                 # Attribution gap: another quote follows -> stay in one paragraph
                 seen_close = True
             else:
                 # Standalone inline quote -> split if next word starts a sentence
                 if i + 1 < n:
-                    ns = words[i + 1].lstrip(_LDQUO)
+                    ns = words[i + 1].lstrip(_LDQUO + '*')
                     if ns and ns[0].isupper():
                         new_p.append('\n\n')
                         seen_close = False
@@ -281,7 +391,7 @@ def split_prose_line(line):
         if not inside_quote and w and w[-1] in '.?!':
             if i + 1 < n:
                 nxt = words[i + 1]
-                ns = nxt.lstrip(_LDQUO)
+                ns = nxt.lstrip(_LDQUO + '*')
                 if ns and ns[0].isupper():
                     clean = re.sub(r'[^\w]', '', w)
                     if clean in abbrevs:
@@ -408,7 +518,6 @@ def clean_text(text):
     # PHASE 4: Formatting
     final = []
     found_title = False
-    promote = False
 
     for line in lines:
         stripped = line.strip()
@@ -420,23 +529,19 @@ def clean_text(text):
             if re.match(r'^\s*([-*+\u2022]|\d+\.|\|)', line):
                 found_title = True
             else:
-                if re.match(r'^#\s+', line):
-                    promote = True
-                    line = re.sub(r'^#\s+', '', line)
+                # Ensure the title line is an H1
+                if not re.match(r'^#', line):
+                    line = '# ' + line
                 found_title = True
                 final.append(line)
                 continue
 
         if re.match(r'^[ \t]*[*\u2022]\s+', line):
             line = re.sub(r'^([ \t]*)[*\u2022]\s+', r'\1- ', line)
-        if re.match(r'^\s*\*\*([^*\r\n]+)\*\*\s*$', line):
-            line = re.sub(r'^\s*\*\*([^*\r\n]+)\*\*\s*$', r'## \1', line)
         if re.match(r'^(#{1,6}\s+.+?):\s*$', line):
             line = re.sub(r'^(#{1,6}\s+.+?):\s*$', r'\1', line)
-        if promote and re.match(r'^#+\s+', line):
-            line = re.sub(r'^#', '', line)
 
-        is_struct = re.match(r'^\s*([-*+]|\u2022|\d+\.|#|\|)', line)
+        is_struct = re.match(r'^\s*([-+]|\*(?!\*)|\u2022|\d+\.|#|\||>)', line)
         if is_struct:
             final.append(line)
             continue
@@ -452,8 +557,11 @@ def clean_text(text):
                     final.append(heading_text + ':')
                 final.extend(split_reference_block(body))
                 continue
-        if _DOI_LIKE.search(line):
-            # No heading but line contains a DOI -> treat as reference block
+        if _DOI_LIKE.search(line) and find_reference_entry_starts(line):
+            # No heading, but the line contains real author-year reference-entry
+            # boundaries alongside a DOI -> treat as a merged reference block.
+            # A DOI URL cited inline in ordinary prose (no author-year pattern)
+            # is NOT a reference block and must still go through prose splitting.
             final.extend(split_reference_block(line))
             continue
 
